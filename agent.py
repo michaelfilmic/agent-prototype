@@ -1,9 +1,11 @@
+import re
 from typing import TypedDict, Literal
 from langgraph.graph import StateGraph, END
 
 from model import get_llm
 from search import web_search, filter_results, format_for_llm as format_web
 from knowledge import query_knowledge, format_for_llm as format_local
+from scrubber import process_file
 
 llm = get_llm()
 
@@ -12,7 +14,7 @@ llm = get_llm()
 
 class AgentState(TypedDict):
     question:         str
-    route:            str   # "local", "web", "direct"
+    route:            str   # "local", "web", "direct", "scrub"
     search_query:     str
     raw_results:      list
     filtered_results: list
@@ -38,16 +40,54 @@ LOCAL_KEYWORDS = [
     "my notes", "i saved", "i wrote", "my docs", "previously", "local",
 ]
 
-def router_node(state: AgentState) -> AgentState:
-    question = state["question"].lower()
+# Regex: detect a file path ending in a supported extension anywhere in the input
+_FILE_PATH_RE = re.compile(
+    r"""
+      (?:^|[\s"'])          # start, whitespace, or quote
+      (
+        (?:[A-Za-z]:[/\\]   # Windows absolute path  C:\...  or  C:/...
+        |  /                # Unix absolute path
+        |  \.{1,2}[/\\]     # relative path  ./  or  ../
+        )?
+        [^\s"']+             # the path body
+        \.(?:csv|xlsx|xls)  # must end with supported extension
+      )
+      (?:$|[\s"'])          # end, whitespace, or quote
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
 
-    # Layer 1: keyword rules
-    if any(kw in question for kw in LOCAL_KEYWORDS):
+SCRUB_KEYWORDS = [
+    # Chinese
+    "清除", "脱敏", "去除敏感", "隐藏", "敏感信息", "bank statement",
+    # English
+    "scrub", "redact", "remove sensitive", "anonymize", "anonymise",
+    "clean sensitive", "mask", "sanitize", "sanitise",
+]
+
+
+def _extract_file_path(text: str) -> str | None:
+    """Return the first file path found in text, or None."""
+    m = _FILE_PATH_RE.search(text)
+    return m.group(1).strip() if m else None
+
+
+def router_node(state: AgentState) -> AgentState:
+    question = state["question"]
+    q_lower = question.lower()
+
+    # ── Scrub route: file path present, or explicit scrub keyword ──
+    file_path = _extract_file_path(question)
+    has_scrub_kw = any(kw in q_lower for kw in SCRUB_KEYWORDS)
+    if file_path or has_scrub_kw:
+        return {**state, "route": "scrub", "search_query": file_path or ""}
+
+    # ── Local / web / direct (original logic) ───────────────────
+    if any(kw in q_lower for kw in LOCAL_KEYWORDS):
         return {**state, "route": "local"}
-    if any(kw in question for kw in WEB_KEYWORDS):
+    if any(kw in q_lower for kw in WEB_KEYWORDS):
         return {**state, "route": "web"}
 
-    # Layer 2: ask LLM
     prompt = (
         "Classify this question into one of three categories:\n"
         "- LOCAL: asks about the user's personal notes, saved files, or past work\n"
@@ -66,6 +106,30 @@ def router_node(state: AgentState) -> AgentState:
         route = "direct"
 
     return {**state, "route": route}
+
+
+# ── Node 1s: File Scrubber ────────────────────────────────────
+
+def scrub_node(state: AgentState) -> AgentState:
+    """Detect and redact sensitive info from a CSV / Excel file."""
+    file_path = state.get("search_query", "").strip()
+
+    # If the path wasn't captured by the router regex, try to find it in the question
+    if not file_path:
+        file_path = _extract_file_path(state["question"]) or ""
+
+    if not file_path:
+        answer = (
+            "I can scrub sensitive information from a bank-statement file.\n"
+            "Please provide the full path to a .csv, .xlsx, or .xls file.\n"
+            "Example:\n"
+            "  scrub C:\\Users\\you\\Downloads\\statement.csv"
+        )
+    else:
+        # Pass the LLM so scrubber can analyse columns + sample data dynamically
+        answer = process_file(file_path, llm=llm)
+
+    return {**state, "answer": answer, "final_answer": answer}
 
 
 # ── Node 1a: Local Search ─────────────────────────────────────
@@ -149,8 +213,9 @@ def citation_formatter_node(state: AgentState) -> AgentState:
 
 # ── Routing Functions ─────────────────────────────────────────
 
-def route_after_router(state: AgentState) -> Literal["local_search", "query_rewriter", "answer_generator"]:
+def route_after_router(state: AgentState) -> Literal["scrub", "local_search", "query_rewriter", "answer_generator"]:
     return {
+        "scrub":  "scrub",
         "local":  "local_search",
         "web":    "query_rewriter",
         "direct": "answer_generator",
@@ -167,6 +232,7 @@ def route_after_answer(state: AgentState) -> Literal["citation_formatter", "__en
 graph = StateGraph(AgentState)
 
 graph.add_node("router",             router_node)
+graph.add_node("scrub",              scrub_node)
 graph.add_node("local_search",       local_search_node)
 graph.add_node("query_rewriter",     query_rewriter_node)
 graph.add_node("web_search",         web_search_node)
@@ -177,10 +243,12 @@ graph.add_node("citation_formatter", citation_formatter_node)
 graph.set_entry_point("router")
 
 graph.add_conditional_edges("router", route_after_router, {
+    "scrub":           "scrub",
     "local_search":    "local_search",
     "query_rewriter":  "query_rewriter",
     "answer_generator":"answer_generator",
 })
+graph.add_edge("scrub", END)
 graph.add_edge("local_search",     "answer_generator")
 graph.add_edge("query_rewriter",   "web_search")
 graph.add_edge("web_search",       "result_filter")
@@ -219,7 +287,12 @@ if __name__ == "__main__":
 
         result = agent.invoke(initial_state)
 
-        icons = {"local": "📚 Local KB", "web": "🔍 Web search", "direct": "💭 Direct"}
+        icons = {
+            "scrub":  "🔒 File scrubber",
+            "local":  "📚 Local KB",
+            "web":    "🔍 Web search",
+            "direct": "💭 Direct",
+        }
         mode = icons.get(result["route"], "💭 Direct")
         print(f"\n[{mode}]")
         print(f"Agent: {result['final_answer'] or result['answer']}\n")

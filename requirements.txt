@@ -5,3 +5,6 @@ langchain-community
 ddgs
 sentence-transformers
 chromadb
+pandas
+openpyxl
+xlrd
