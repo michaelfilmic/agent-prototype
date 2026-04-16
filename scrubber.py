@@ -26,8 +26,43 @@ import json
 import os
 import re
 import sys
+from pathlib import Path, PureWindowsPath, PurePosixPath
 
 import pandas as pd
+
+
+# ── Path normalisation ─────────────────────────────────────────────────────────
+
+def _detect_and_normalize_path(raw: str) -> str:
+    """
+    Auto-detect Windows vs Linux/Mac path format and return a Path object
+    usable on the current OS.
+
+    Examples:
+        "C:\\Users\\micha\\file.csv"   → Windows absolute
+        "C:/Users/micha/file.csv"      → Windows absolute (mixed slashes)
+        "/home/user/file.csv"          → Unix absolute
+        "./data/file.csv"              → relative (either OS)
+        "test_run_data/file.csv"       → relative (either OS)
+    """
+    raw = raw.strip().strip("\"'")
+
+    # Windows absolute path: starts with a drive letter  C:\ or C:/
+    if re.match(r"^[A-Za-z]:[/\\]", raw):
+        return str(Path(PureWindowsPath(raw)))
+
+    # Git Bash / MSYS2 Windows path: /c/Users/... → C:\Users\...
+    if re.match(r"^/[A-Za-z]/", raw):
+        drive = raw[1].upper()          # 'c' → 'C'
+        rest = raw[2:].replace("/", "\\")  # /Users/micha/... → \Users\micha\...
+        return str(Path(PureWindowsPath(f"{drive}:{rest}")))
+
+    # Unix absolute path: starts with /
+    if raw.startswith("/"):
+        return str(Path(PurePosixPath(raw)))
+
+    # Relative path — works on both OSes as-is
+    return str(Path(raw))
 
 
 # ── Regex fallback patterns ────────────────────────────────────────────────────
@@ -60,6 +95,20 @@ _VALUE_PATTERNS: list[tuple[re.Pattern, str]] = [
 
 REDACT = "[REDACTED]"
 
+# Columns that should never be redacted regardless of what the LLM says
+_SAFE_COLUMN_RE = re.compile(
+    r"^date$|^time$|^timestamp$|^datetime$"
+    r"|^amount$|^balance$|^debit$|^credit$|^value$|^total$"
+    r"|^currency$|^ccy$"
+    r"|^description$|^desc$|^details$|^narrative$|^memo$|^note$|^remarks$"
+    r"|^category$|^type$|^transaction[\s_]?type$",
+    re.IGNORECASE,
+)
+
+
+def _is_safe_column(name: str) -> bool:
+    return bool(_SAFE_COLUMN_RE.search(name.strip()))
+
 
 # ── LLM-based column / pattern detection ──────────────────────────────────────
 
@@ -77,21 +126,31 @@ Sample rows (first {len(sample)}):
 {json.dumps(sample, indent=2)}
 
 Task:
-1. Identify every column that contains sensitive personal or financial data
-   (e.g. account numbers, BSB/sort codes, card numbers, PINs, passwords,
-   full names when paired with financial data, addresses, phone numbers,
-   tax/national IDs, etc.).
-2. Identify any sensitive patterns you can see in the *values* of non-obvious
-   columns (e.g. a "Notes" column that happens to contain card numbers).
+Identify columns that contain DIRECTLY IDENTIFYING sensitive data that must be redacted.
+
+SENSITIVE — redact these:
+- Account numbers, BSB / sort codes, IBAN, routing numbers
+- Credit / debit card numbers
+- PIN, password, CVV
+- Government IDs: SSN, TFN, passport number
+- Full person names (first + last name together)
+- Phone numbers, email addresses, physical addresses
+
+NOT SENSITIVE — do NOT redact these:
+- Dates and timestamps
+- Transaction amounts and balances
+- General text descriptions of transactions (e.g. "Coffee", "Salary", "Netflix")
+- Merchant / payee category labels
+- Currency codes
 
 Reply with ONLY valid JSON — no explanation, no markdown fences:
 {{
   "sensitive_columns": ["<exact column name>", ...],
-  "value_patterns_found": ["<plain-English description>", ...],
+  "value_patterns_found": ["<plain-English description of sensitive values hidden inside non-obvious columns>", ...],
   "reasoning": "<one short sentence>"
 }}
 
-Only reference column names that exist in the list above.
+Only reference column names that exist in: {columns}
 If nothing is sensitive, return empty lists."""
 
 
@@ -167,6 +226,10 @@ def scrub_dataframe(
     changes: list[dict] = []
 
     for col in df.columns:
+        # Whitelist overrides everything — never redact safe columns
+        if _is_safe_column(col):
+            continue
+
         # Column is sensitive if LLM said so OR regex matches the name
         col_is_sensitive = col in llm_cols_set or _regex_sensitive_column(col)
         source = []
@@ -261,7 +324,7 @@ def process_file(file_path: str, llm=None) -> str:
           then regex runs as an additional safety net.
           When None, regex-only mode is used (suitable for CLI use).
     """
-    file_path = file_path.strip().strip("\"'")
+    file_path = _detect_and_normalize_path(file_path)
 
     if not os.path.exists(file_path):
         return f"Error: file not found — {file_path}"

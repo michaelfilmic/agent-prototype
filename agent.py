@@ -40,19 +40,25 @@ LOCAL_KEYWORDS = [
     "my notes", "i saved", "i wrote", "my docs", "previously", "local",
 ]
 
-# Regex: detect a file path ending in a supported extension anywhere in the input
+# Regex: detect a file path ending in a supported extension anywhere in the input.
+# The prefix is REQUIRED (drive letter / Git Bash /c/ / Unix / / relative ./)
+# so we don't accidentally swallow arbitrary preceding text.
+# The boundary before the path can be anything that isn't itself a path character
+# (space, quote, CJK punctuation, Chinese characters, colons, etc.).
 _FILE_PATH_RE = re.compile(
     r"""
-      (?:^|[\s"'])          # start, whitespace, or quote
+      (?:^|(?<=[^/\\A-Za-z0-9_.~-]))   # must be preceded by a non-path char (or start)
       (
-        (?:[A-Za-z]:[/\\]   # Windows absolute path  C:\...  or  C:/...
-        |  /                # Unix absolute path
-        |  \.{1,2}[/\\]     # relative path  ./  or  ../
-        )?
-        [^\s"']+             # the path body
-        \.(?:csv|xlsx|xls)  # must end with supported extension
+        (?:
+          [A-Za-z]:[/\\]                # Windows absolute:  C:\  or  C:/
+        | /[A-Za-z]/                    # Git Bash / MSYS2:  /c/
+        | /                             # Unix absolute:     /home/...
+        | \.{1,2}[/\\]                  # relative:          ./  or  ../
+        )
+        [^\s"']+                        # rest of the path (no spaces/quotes)
+        \.(?:csv|xlsx|xls)              # must end with a supported extension
       )
-      (?:$|[\s"'])          # end, whitespace, or quote
+      (?=$|\s|["'])                     # must be followed by end / space / quote
     """,
     re.IGNORECASE | re.VERBOSE,
 )
