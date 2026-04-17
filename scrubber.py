@@ -68,7 +68,7 @@ def _detect_and_normalize_path(raw: str) -> str:
 # ── Regex fallback patterns ────────────────────────────────────────────────────
 
 _SENSITIVE_COLUMN_RE = re.compile(
-    r"account[\s_\-]?(no|num|number)?"
+    r"account(?![\s_\-]?type)[\s_\-]?(no|num|number)?"
     r"|acct"
     r"|bsb"
     r"|sort[\s_\-]?code"
@@ -239,8 +239,9 @@ def scrub_dataframe(
             source.append("regex")
         col_reason = f"sensitive column [{'/'.join(source)}]" if col_is_sensitive else ""
 
-        for idx in df.index:
+        for pos, idx in enumerate(df.index):
             cell = df.at[idx, col]
+
             if pd.isna(cell):
                 continue
 
@@ -257,7 +258,7 @@ def scrub_dataframe(
                 scrubbed.at[idx, col] = new_val
                 changes.append(
                     {
-                        "row": idx,
+                        "row": pos,          # always an int (0-based position)
                         "column": col,
                         "original": original_str,
                         "redacted": new_val,
@@ -334,6 +335,21 @@ def process_file(file_path: str, llm=None) -> str:
         df = pd.read_csv(file_path)
     elif ext in (".xlsx", ".xls"):
         df = pd.read_excel(file_path)
+
+    # If pandas used a non-default index (e.g. CSV header has N cols but data has
+    # N+1 → first data column becomes the row index with repeated string values),
+    # reset to a clean RangeIndex so df.at[idx, col] always returns a scalar.
+    # If pandas auto-promoted the first data column to the row index
+    # (happens when data rows have one more field than the header, e.g. trailing
+    # commas), re-read with index_col=False so every data field maps to the
+    # correct header column, then drop any trailing unnamed/empty columns.
+    if not isinstance(df.index, pd.RangeIndex):
+        if ext == ".csv":
+            df = pd.read_csv(file_path, index_col=False)
+        else:
+            df = pd.read_excel(file_path, index_col=False)
+        # Drop auto-generated "Unnamed: N" columns produced by trailing commas
+        df = df.loc[:, ~df.columns.str.match(r"^Unnamed:")]
     else:
         return (
             f"Unsupported file type '{ext}'. "
