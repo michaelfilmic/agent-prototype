@@ -5,7 +5,7 @@ from langgraph.graph import StateGraph, END
 from model import get_llm
 from search import web_search, filter_results, format_for_llm as format_web
 from knowledge import query_knowledge, format_for_llm as format_local
-from scrubber import process_file
+from scrubber import validate_and_normalize, scrub_and_save
 
 llm = get_llm()
 
@@ -21,6 +21,8 @@ class AgentState(TypedDict):
     local_results:    list
     answer:           str
     final_answer:     str
+    file_path:        str   # normalized path passed from excel_process → scrub
+    file_ext:         str   # ".csv" / ".xlsx" / ".xls"
 
 
 # ── Node 0: Router (3-way) ────────────────────────────────────
@@ -114,27 +116,38 @@ def router_node(state: AgentState) -> AgentState:
     return {**state, "route": route}
 
 
-# ── Node 1s: File Scrubber ────────────────────────────────────
+# ── Node 1e: Excel Process ────────────────────────────────────
 
-def scrub_node(state: AgentState) -> AgentState:
-    """Detect and redact sensitive info from a CSV / Excel file."""
-    file_path = state.get("search_query", "").strip()
+def excel_process_node(state: AgentState) -> AgentState:
+    """Extract, normalize and validate the file path from the user's question."""
+    raw_path = state.get("search_query", "").strip()
+    if not raw_path:
+        raw_path = _extract_file_path(state["question"]) or ""
 
-    # If the path wasn't captured by the router regex, try to find it in the question
-    if not file_path:
-        file_path = _extract_file_path(state["question"]) or ""
-
-    if not file_path:
+    if not raw_path:
         answer = (
-            "I can scrub sensitive information from a bank-statement file.\n"
             "Please provide the full path to a .csv, .xlsx, or .xls file.\n"
             "Example:\n"
             "  scrub C:\\Users\\you\\Downloads\\statement.csv"
         )
-    else:
-        # Pass the LLM so scrubber can analyse columns + sample data dynamically
-        answer = process_file(file_path, llm=llm)
+        return {**state, "answer": answer, "final_answer": answer,
+                "file_path": "", "file_ext": ""}
 
+    result = validate_and_normalize(raw_path)
+    if isinstance(result, str):          # error message returned
+        return {**state, "answer": result, "final_answer": result,
+                "file_path": "", "file_ext": ""}
+
+    normalized_path, ext = result
+    print(f"  [excel_process] File validated: {normalized_path}")
+    return {**state, "file_path": normalized_path, "file_ext": ext}
+
+
+# ── Node 1s: Scrub ────────────────────────────────────────────
+
+def scrub_node(state: AgentState) -> AgentState:
+    """Run LLM + regex detection and redact sensitive data from the loaded file."""
+    answer = scrub_and_save(state["file_path"], state["file_ext"], llm=llm)
     return {**state, "answer": answer, "final_answer": answer}
 
 
@@ -219,13 +232,18 @@ def citation_formatter_node(state: AgentState) -> AgentState:
 
 # ── Routing Functions ─────────────────────────────────────────
 
-def route_after_router(state: AgentState) -> Literal["scrub", "local_search", "query_rewriter", "answer_generator"]:
+def route_after_router(state: AgentState) -> Literal["excel_process", "local_search", "query_rewriter", "answer_generator"]:
     return {
-        "scrub":  "scrub",
+        "scrub":  "excel_process",
         "local":  "local_search",
         "web":    "query_rewriter",
         "direct": "answer_generator",
     }[state["route"]]
+
+
+def route_after_excel_process(state: AgentState) -> Literal["scrub", "__end__"]:
+    """Continue to scrub only if excel_process successfully validated the file."""
+    return "scrub" if state.get("file_path") else "__end__"
 
 
 def route_after_answer(state: AgentState) -> Literal["citation_formatter", "__end__"]:
@@ -238,6 +256,7 @@ def route_after_answer(state: AgentState) -> Literal["citation_formatter", "__en
 graph = StateGraph(AgentState)
 
 graph.add_node("router",             router_node)
+graph.add_node("excel_process",      excel_process_node)
 graph.add_node("scrub",              scrub_node)
 graph.add_node("local_search",       local_search_node)
 graph.add_node("query_rewriter",     query_rewriter_node)
@@ -249,10 +268,14 @@ graph.add_node("citation_formatter", citation_formatter_node)
 graph.set_entry_point("router")
 
 graph.add_conditional_edges("router", route_after_router, {
-    "scrub":           "scrub",
+    "excel_process":   "excel_process",
     "local_search":    "local_search",
     "query_rewriter":  "query_rewriter",
     "answer_generator":"answer_generator",
+})
+graph.add_conditional_edges("excel_process", route_after_excel_process, {
+    "scrub":    "scrub",
+    "__end__":  END,
 })
 graph.add_edge("scrub", END)
 graph.add_edge("local_search",     "answer_generator")
@@ -289,6 +312,8 @@ if __name__ == "__main__":
             "local_results":    [],
             "answer":           "",
             "final_answer":     "",
+            "file_path":        "",
+            "file_ext":         "",
         }
 
         result = agent.invoke(initial_state)

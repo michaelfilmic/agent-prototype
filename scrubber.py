@@ -98,10 +98,15 @@ REDACT = "[REDACTED]"
 # Columns that should never be redacted regardless of what the LLM says
 _SAFE_COLUMN_RE = re.compile(
     r"^date$|^time$|^timestamp$|^datetime$"
+    r"|transaction[\s_]?date"
     r"|^amount$|^balance$|^debit$|^credit$|^value$|^total$"
     r"|^currency$|^ccy$"
-    r"|^description$|^desc$|^details$|^narrative$|^memo$|^note$|^remarks$"
-    r"|^category$|^type$|^transaction[\s_]?type$",
+    r"|[A-Za-z]{2,3}\$"              # currency columns: CAD$, USD$, AUD$, etc.
+    r"|description[\s_]?\d*$"        # Description, Description 1, Description 2
+    r"|^desc$|^details$|^narrative$|^memo$|^note$|^remarks$"
+    r"|^category$|^type$"
+    r"|transaction[\s_]?type"
+    r"|account[\s_]?type",
     re.IGNORECASE,
 )
 
@@ -314,47 +319,66 @@ def format_diff(
     return "\n".join(lines)
 
 
-# ── Public entry point ─────────────────────────────────────────────────────────
+# ── Public entry points ────────────────────────────────────────────────────────
 
-def process_file(file_path: str, llm=None) -> str:
+def validate_and_normalize(raw_path: str) -> tuple[str, str] | str:
+    """
+    Normalize raw_path and validate it is a readable supported file.
+
+    Returns (normalized_path, ext) on success, or an error string on failure.
+    Called by excel_process_node before handing off to scrub_node.
+    """
+    file_path = _detect_and_normalize_path(raw_path)
+
+    if not os.path.exists(file_path):
+        return f"Error: file not found — {file_path}"
+
+    ext = os.path.splitext(file_path)[1].lower()
+    if ext not in (".csv", ".xlsx", ".xls"):
+        return (
+            f"Unsupported file type '{ext}'. "
+            "Please provide a .csv, .xlsx, or .xls file."
+        )
+
+    return file_path, ext
+
+
+def _read_file(file_path: str, ext: str) -> pd.DataFrame:
+    """
+    Read a CSV or Excel file into a DataFrame.
+
+    Handles the edge case where data rows have one more field than the header
+    (e.g. trailing commas exported by some banks): pandas would auto-promote
+    the first data column to the row index, shifting all columns by one.
+    We detect this and re-read with index_col=False, then drop unnamed trailing
+    columns, so every data field maps correctly to its header.
+    """
+    if ext == ".csv":
+        df = pd.read_csv(file_path)
+    else:
+        df = pd.read_excel(file_path)
+
+    if not isinstance(df.index, pd.RangeIndex):
+        if ext == ".csv":
+            df = pd.read_csv(file_path, index_col=False)
+        else:
+            df = pd.read_excel(file_path, index_col=False)
+        df = df.loc[:, ~df.columns.str.match(r"^Unnamed:")]
+
+    return df
+
+
+def scrub_and_save(file_path: str, ext: str, llm=None) -> str:
     """
     Read file_path, scrub sensitive data, save *_scrubbed copy, return report.
+    Called by scrub_node after excel_process_node has validated the path.
 
     llm — optional LangChain-compatible LLM instance.
           When supplied, the LLM analyses columns + sample rows first,
           then regex runs as an additional safety net.
           When None, regex-only mode is used (suitable for CLI use).
     """
-    file_path = _detect_and_normalize_path(file_path)
-
-    if not os.path.exists(file_path):
-        return f"Error: file not found — {file_path}"
-
-    ext = os.path.splitext(file_path)[1].lower()
-    if ext == ".csv":
-        df = pd.read_csv(file_path)
-    elif ext in (".xlsx", ".xls"):
-        df = pd.read_excel(file_path)
-
-    # If pandas used a non-default index (e.g. CSV header has N cols but data has
-    # N+1 → first data column becomes the row index with repeated string values),
-    # reset to a clean RangeIndex so df.at[idx, col] always returns a scalar.
-    # If pandas auto-promoted the first data column to the row index
-    # (happens when data rows have one more field than the header, e.g. trailing
-    # commas), re-read with index_col=False so every data field maps to the
-    # correct header column, then drop any trailing unnamed/empty columns.
-    if not isinstance(df.index, pd.RangeIndex):
-        if ext == ".csv":
-            df = pd.read_csv(file_path, index_col=False)
-        else:
-            df = pd.read_excel(file_path, index_col=False)
-        # Drop auto-generated "Unnamed: N" columns produced by trailing commas
-        df = df.loc[:, ~df.columns.str.match(r"^Unnamed:")]
-    else:
-        return (
-            f"Unsupported file type '{ext}'. "
-            "Please provide a .csv, .xlsx, or .xls file."
-        )
+    df = _read_file(file_path, ext)
 
     # ── Detection ──────────────────────────────────────────────
     llm_cols: list[str] = []
@@ -380,6 +404,15 @@ def process_file(file_path: str, llm=None) -> str:
         scrubbed_df.to_excel(out_path, index=False, engine="openpyxl")
 
     return format_diff(changes, file_path, out_path, llm_notes, detection_mode)
+
+
+def process_file(file_path: str, llm=None) -> str:
+    """Convenience wrapper used by the standalone CLI."""
+    result = validate_and_normalize(file_path)
+    if isinstance(result, str):          # error message
+        return result
+    normalized_path, ext = result
+    return scrub_and_save(normalized_path, ext, llm=llm)
 
 
 # ── Standalone CLI (regex-only) ───────────────────────────────────────────────
