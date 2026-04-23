@@ -8,7 +8,7 @@ from search import web_search, filter_results, format_for_llm as format_web
 from knowledge import query_knowledge, format_for_llm as format_local
 from scrubber import validate_and_normalize, scrub_and_save
 from scrubber import _read_file                        # internal helper
-from excel_filter import extract_filter_criteria, apply_filters, format_filter_report
+from excel_filter import extract_filter_criteria, correct_criteria, apply_filters, format_filter_report
 
 llm = get_llm()
 
@@ -178,7 +178,9 @@ def excel_process_node(state: AgentState) -> AgentState:
         criteria = extract_filter_criteria(
             state["question"], df.columns.tolist(), sample, llm
         )
-        print(f"  [excel_process] Criteria: {criteria}")
+        print(f"  [excel_process] LLM raw criteria : {criteria}")
+        criteria = correct_criteria(criteria, df)
+        print(f"  [excel_process] Corrected criteria: {criteria}")
         df = apply_filters(df, criteria)
         print(f"  [excel_process] {original_count} → {len(df)} rows after filter")
 
