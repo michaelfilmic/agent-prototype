@@ -44,9 +44,14 @@ LOCAL_KEYWORDS = [
 ]
 
 SCRUB_KEYWORDS = [
-    "清除", "脱敏", "去除敏感", "隐藏", "敏感信息",
-    "scrub", "redact", "remove sensitive", "anonymize", "anonymise",
-    "clean sensitive", "mask", "sanitize", "sanitise",
+    # Chinese
+    "清除", "脱敏", "去除敏感", "隐藏", "敏感信息", "敏感", "清理",
+    # English — action words
+    "scrub", "redact", "anonymize", "anonymise", "sanitize", "sanitise",
+    "clean up", "cleanup", "clean out",
+    # English — descriptive (no verb needed, presence alone implies scrub intent)
+    "sensitive information", "sensitive data", "sensitive info",
+    "remove sensitive", "clean sensitive", "mask", "private information",
 ]
 
 FILTER_KEYWORDS = [
