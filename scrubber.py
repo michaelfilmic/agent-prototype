@@ -22,6 +22,8 @@ Usage (from agent, with LLM):
     process_file(path, llm=llm)
 """
 
+from __future__ import annotations
+
 import json
 import os
 import re
@@ -243,7 +245,7 @@ def format_diff(
         display = orig if len(orig) <= 22 else orig[:19] + "..."
         lines.append(
             f"{str(c['row'] + 2):<6}  {c['column']:<28}  "
-            f"{display!r:>22} → {c['redacted']:<12}  [{c['reason']}]"
+            f"{display!r:>22} -> {c['redacted']:<12}  [{c['reason']}]"
         )
 
     lines.append(sep)

@@ -6,3 +6,4 @@ knowledge_db/
 docs/
 test_run_data/
 .claude/
+*.swp
