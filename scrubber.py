@@ -28,14 +28,49 @@ import json
 import os
 import re
 import sys
+from pathlib import Path, PureWindowsPath, PurePosixPath
 
 import pandas as pd
+
+
+# ── Path normalisation ─────────────────────────────────────────────────────────
+
+def _detect_and_normalize_path(raw: str) -> str:
+    """
+    Auto-detect Windows vs Linux/Mac path format and return a Path object
+    usable on the current OS.
+
+    Examples:
+        "C:\\Users\\micha\\file.csv"   → Windows absolute
+        "C:/Users/micha/file.csv"      → Windows absolute (mixed slashes)
+        "/home/user/file.csv"          → Unix absolute
+        "./data/file.csv"              → relative (either OS)
+        "test_run_data/file.csv"       → relative (either OS)
+    """
+    raw = raw.strip().strip("\"'")
+
+    # Windows absolute path: starts with a drive letter  C:\ or C:/
+    if re.match(r"^[A-Za-z]:[/\\]", raw):
+        return str(Path(PureWindowsPath(raw)))
+
+    # Git Bash / MSYS2 Windows path: /c/Users/... → C:\Users\...
+    if re.match(r"^/[A-Za-z]/", raw):
+        drive = raw[1].upper()          # 'c' → 'C'
+        rest = raw[2:].replace("/", "\\")  # /Users/micha/... → \Users\micha\...
+        return str(Path(PureWindowsPath(f"{drive}:{rest}")))
+
+    # Unix absolute path: starts with /
+    if raw.startswith("/"):
+        return str(Path(PurePosixPath(raw)))
+
+    # Relative path — works on both OSes as-is
+    return str(Path(raw))
 
 
 # ── Regex fallback patterns ────────────────────────────────────────────────────
 
 _SENSITIVE_COLUMN_RE = re.compile(
-    r"account[\s_\-]?(no|num|number)?"
+    r"account(?![\s_\-]?type)[\s_\-]?(no|num|number)?"
     r"|acct"
     r"|bsb"
     r"|sort[\s_\-]?code"
@@ -62,6 +97,25 @@ _VALUE_PATTERNS: list[tuple[re.Pattern, str]] = [
 
 REDACT = "[REDACTED]"
 
+# Columns that should never be redacted regardless of what the LLM says
+_SAFE_COLUMN_RE = re.compile(
+    r"^date$|^time$|^timestamp$|^datetime$"
+    r"|transaction[\s_]?date"
+    r"|^amount$|^balance$|^debit$|^credit$|^value$|^total$"
+    r"|^currency$|^ccy$"
+    r"|[A-Za-z]{2,3}\$"              # currency columns: CAD$, USD$, AUD$, etc.
+    r"|description[\s_]?\d*$"        # Description, Description 1, Description 2
+    r"|^desc$|^details$|^narrative$|^memo$|^note$|^remarks$"
+    r"|^category$|^type$"
+    r"|transaction[\s_]?type"
+    r"|account[\s_]?type",
+    re.IGNORECASE,
+)
+
+
+def _is_safe_column(name: str) -> bool:
+    return bool(_SAFE_COLUMN_RE.search(name.strip()))
+
 
 # ── LLM-based column / pattern detection ──────────────────────────────────────
 
@@ -79,21 +133,31 @@ Sample rows (first {len(sample)}):
 {json.dumps(sample, indent=2)}
 
 Task:
-1. Identify every column that contains sensitive personal or financial data
-   (e.g. account numbers, BSB/sort codes, card numbers, PINs, passwords,
-   full names when paired with financial data, addresses, phone numbers,
-   tax/national IDs, etc.).
-2. Identify any sensitive patterns you can see in the *values* of non-obvious
-   columns (e.g. a "Notes" column that happens to contain card numbers).
+Identify columns that contain DIRECTLY IDENTIFYING sensitive data that must be redacted.
+
+SENSITIVE — redact these:
+- Account numbers, BSB / sort codes, IBAN, routing numbers
+- Credit / debit card numbers
+- PIN, password, CVV
+- Government IDs: SSN, TFN, passport number
+- Full person names (first + last name together)
+- Phone numbers, email addresses, physical addresses
+
+NOT SENSITIVE — do NOT redact these:
+- Dates and timestamps
+- Transaction amounts and balances
+- General text descriptions of transactions (e.g. "Coffee", "Salary", "Netflix")
+- Merchant / payee category labels
+- Currency codes
 
 Reply with ONLY valid JSON — no explanation, no markdown fences:
 {{
   "sensitive_columns": ["<exact column name>", ...],
-  "value_patterns_found": ["<plain-English description>", ...],
+  "value_patterns_found": ["<plain-English description of sensitive values hidden inside non-obvious columns>", ...],
   "reasoning": "<one short sentence>"
 }}
 
-Only reference column names that exist in the list above.
+Only reference column names that exist in: {columns}
 If nothing is sensitive, return empty lists."""
 
 
@@ -169,6 +233,10 @@ def scrub_dataframe(
     changes: list[dict] = []
 
     for col in df.columns:
+        # Whitelist overrides everything — never redact safe columns
+        if _is_safe_column(col):
+            continue
+
         # Column is sensitive if LLM said so OR regex matches the name
         col_is_sensitive = col in llm_cols_set or _regex_sensitive_column(col)
         source = []
@@ -178,8 +246,9 @@ def scrub_dataframe(
             source.append("regex")
         col_reason = f"sensitive column [{'/'.join(source)}]" if col_is_sensitive else ""
 
-        for idx in df.index:
+        for pos, idx in enumerate(df.index):
             cell = df.at[idx, col]
+
             if pd.isna(cell):
                 continue
 
@@ -196,7 +265,7 @@ def scrub_dataframe(
                 scrubbed.at[idx, col] = new_val
                 changes.append(
                     {
-                        "row": idx,
+                        "row": pos,          # always an int (0-based position)
                         "column": col,
                         "original": original_str,
                         "redacted": new_val,
@@ -252,32 +321,66 @@ def format_diff(
     return "\n".join(lines)
 
 
-# ── Public entry point ─────────────────────────────────────────────────────────
+# ── Public entry points ────────────────────────────────────────────────────────
 
-def process_file(file_path: str, llm=None) -> str:
+def validate_and_normalize(raw_path: str) -> tuple[str, str] | str:
+    """
+    Normalize raw_path and validate it is a readable supported file.
+
+    Returns (normalized_path, ext) on success, or an error string on failure.
+    Called by excel_process_node before handing off to scrub_node.
+    """
+    file_path = _detect_and_normalize_path(raw_path)
+
+    if not os.path.exists(file_path):
+        return f"Error: file not found — {file_path}"
+
+    ext = os.path.splitext(file_path)[1].lower()
+    if ext not in (".csv", ".xlsx", ".xls"):
+        return (
+            f"Unsupported file type '{ext}'. "
+            "Please provide a .csv, .xlsx, or .xls file."
+        )
+
+    return file_path, ext
+
+
+def _read_file(file_path: str, ext: str) -> pd.DataFrame:
+    """
+    Read a CSV or Excel file into a DataFrame.
+
+    Handles the edge case where data rows have one more field than the header
+    (e.g. trailing commas exported by some banks): pandas would auto-promote
+    the first data column to the row index, shifting all columns by one.
+    We detect this and re-read with index_col=False, then drop unnamed trailing
+    columns, so every data field maps correctly to its header.
+    """
+    if ext == ".csv":
+        df = pd.read_csv(file_path)
+    else:
+        df = pd.read_excel(file_path)
+
+    if not isinstance(df.index, pd.RangeIndex):
+        if ext == ".csv":
+            df = pd.read_csv(file_path, index_col=False)
+        else:
+            df = pd.read_excel(file_path, index_col=False)
+        df = df.loc[:, ~df.columns.str.match(r"^Unnamed:")]
+
+    return df
+
+
+def scrub_and_save(file_path: str, ext: str, llm=None) -> str:
     """
     Read file_path, scrub sensitive data, save *_scrubbed copy, return report.
+    Called by scrub_node after excel_process_node has validated the path.
 
     llm — optional LangChain-compatible LLM instance.
           When supplied, the LLM analyses columns + sample rows first,
           then regex runs as an additional safety net.
           When None, regex-only mode is used (suitable for CLI use).
     """
-    file_path = file_path.strip().strip("\"'")
-
-    if not os.path.exists(file_path):
-        return f"Error: file not found — {file_path}"
-
-    ext = os.path.splitext(file_path)[1].lower()
-    if ext == ".csv":
-        df = pd.read_csv(file_path)
-    elif ext in (".xlsx", ".xls"):
-        df = pd.read_excel(file_path)
-    else:
-        return (
-            f"Unsupported file type '{ext}'. "
-            "Please provide a .csv, .xlsx, or .xls file."
-        )
+    df = _read_file(file_path, ext)
 
     # ── Detection ──────────────────────────────────────────────
     llm_cols: list[str] = []
@@ -303,6 +406,15 @@ def process_file(file_path: str, llm=None) -> str:
         scrubbed_df.to_excel(out_path, index=False, engine="openpyxl")
 
     return format_diff(changes, file_path, out_path, llm_notes, detection_mode)
+
+
+def process_file(file_path: str, llm=None) -> str:
+    """Convenience wrapper used by the standalone CLI."""
+    result = validate_and_normalize(file_path)
+    if isinstance(result, str):          # error message
+        return result
+    normalized_path, ext = result
+    return scrub_and_save(normalized_path, ext, llm=llm)
 
 
 # ── Standalone CLI (regex-only) ───────────────────────────────────────────────
