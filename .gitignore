@@ -7,3 +7,4 @@ docs/
 test_run_data/
 .claude/
 *.swp
+out_test/

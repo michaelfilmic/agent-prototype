@@ -1,0 +1,28 @@
+﻿Statement,Header,Field Name,Field Value
+Statement,Data,BrokerName,none
+Statement,Data,BrokerAddress,"none"
+Statement,Data,Title,none
+Statement,Data,Period,"none"
+Statement,Data,WhenGenerated,"none"
+Open Positions,Header,DataDiscriminator,Asset Category,Currency,Symbol,Quantity,Mult,Cost Price,Cost Basis,Close Price,Value,Unrealized P/L,Code
+Open Positions,Data,Summary,Stocks,CAD,CSUU,150,1,8.036666667,1205.5,8.88,1332,126.5,SY
+Open Positions,Total,,Stocks,CAD,,,,,1205.5,,1332,126.5,
+Open Positions,Data,Summary,Stocks,USD,AMZN,1,1,263.215003,263.215003,268.46,268.46,5.244997,
+Open Positions,Data,Summary,Stocks,USD,MSFT,41,1,419.690246902,17207.300123,419.09,17182.69,-24.610123,
+Open Positions,Data,Summary,Stocks,USD,QDTY,200,1,41.37440173,8274.880346,42.02,8404,129.119654,SY
+Open Positions,Data,Summary,Stocks,USD,SPYD,32,1,47.285437094,1513.133987,47.23,1511.36,-1.773987,
+Open Positions,Data,Summary,Stocks,USD,STZ,85,1,157.641483059,13399.52606,150.83,12820.55,-578.97606,
+Open Positions,Data,Summary,Stocks,USD,SWKS,21,1,74.527622048,1565.080063,73.54,1544.34,-20.740063,
+Open Positions,Total,,Stocks,USD,,,,,70913.291197,,71612.28,698.988803,
+Open Positions,Total,,Stocks,CAD,,,,,97704.332611227,,98667.399384,963.066772773,
+Open Positions,Total,,Stocks,CAD,,,,,98909.832611227,,99999.399384,1089.566772773,
+Open Positions,Header,DataDiscriminator,Asset Category,Currency,Symbol,Quantity,Mult,Cost Price,Cost Basis,Close Price,Value,Unrealized P/L,Code
+Open Positions,Data,Summary,Equity and Index Options,USD,BRK B 17JUN27 440 P,-1,100,20.1894876,-2018.94876,15.4425,-1544.25,474.69876,
+Open Positions,Data,Summary,Equity and Index Options,USD,CQQQ 18SEP26 49 P,-1,100,2.9854796,-298.54796,2.4051,-240.51,58.03796,
+Open Positions,Data,Summary,Equity and Index Options,USD,MSFU 17JUL26 38.7 C,1,100,2.0105125,201.05125,0.549,54.9,-146.15125,
+Open Positions,Data,Summary,Equity and Index Options,USD,MSFU 17JUL26 42.7 C,1,100,1.1505125,115.05125,0.3539,35.39,-79.66125,
+Open Positions,Data,Summary,Equity and Index Options,USD,SWKS 18JUN26 75 C,-1,100,0.93746524,-93.746524,3.025,-302.5,-208.753476,
+Open Positions,Data,Summary,Equity and Index Options,USD,SWKS 18JUN26 80 C,1,100,0.4424825,44.24825,1.525,152.5,108.25175,
+Open Positions,Total,,Equity and Index Options,USD,,,,,5110.101479,,261.87,-4848.231479,
+Open Positions,Total,,Equity and Index Options,CAD,,,,,7040.697817766,,360.804486,-6679.893331766,
+Open Positions,Notes,none

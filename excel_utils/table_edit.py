@@ -114,7 +114,11 @@ def table_filter_out(df: pd.DataFrame) -> pd.DataFrame:
             f"Missing columns: {missing}. "
             "Run convert_market_value_to_position_percentage() first."
         )
-    return df[KEEP_COLS].reset_index(drop=True)
+    return (
+        df[KEEP_COLS]
+        .sort_values(POSITION_PCT_COL, ascending=False)
+        .reset_index(drop=True)
+    )
 
 
 # ── Convenience wrapper ────────────────────────────────────────────────────────

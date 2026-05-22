@@ -53,7 +53,8 @@ def run(input_path: str, out_dir: str | None = None) -> None:
         sys.exit(1)
 
     stem    = Path(input_path).stem
-    out_dir = out_dir or str(Path(input_path).parent)
+    out_dir = out_dir or str(Path(__file__).parent.parent / "out_test")
+    os.makedirs(out_dir, exist_ok=True)
 
     # ── Stage 1: table_extractor ──────────────────────────────────────────────
     print(SEP)
@@ -82,9 +83,7 @@ def run(input_path: str, out_dir: str | None = None) -> None:
     df = convert_market_value_to_position_percentage(df)
     df = table_filter_out(df)
 
-    out_path = os.path.join(
-        out_dir, f"{stem}_{OPEN_POSITIONS_KEY}_positions.csv"
-    )
+    out_path = os.path.join(out_dir, f"{stem}_only_market_percentage.csv")
     df.to_csv(out_path, index=False)
 
     print(df.to_string(index=False))
