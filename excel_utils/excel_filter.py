@@ -10,6 +10,8 @@ apply_filters()            executes the corrected rules on a DataFrame.
 format_filter_report()     returns a human-readable summary.
 """
 
+from __future__ import annotations
+
 import json
 import re
 

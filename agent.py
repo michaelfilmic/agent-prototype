@@ -6,9 +6,9 @@ from langgraph.graph import StateGraph, END
 from model import get_llm
 from search import web_search, filter_results, format_for_llm as format_web
 from knowledge import query_knowledge, format_for_llm as format_local
-from scrubber import validate_and_normalize, scrub_and_save
-from scrubber import _read_file                        # internal helper
-from excel_filter import extract_filter_criteria, correct_criteria, apply_filters, format_filter_report
+from excel_utils.scrubber import validate_and_normalize, scrub_and_save
+from excel_utils.scrubber import _read_file            # internal helper
+from excel_utils.excel_filter import extract_filter_criteria, correct_criteria, apply_filters, format_filter_report
 
 llm = get_llm()
 
