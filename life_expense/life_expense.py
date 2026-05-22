@@ -33,6 +33,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from excel_utils.scrubber import scrub_dataframe
 from excel_utils.excel_filter import apply_filters
+from life_expense.expense_report import generate as generate_expense_report, format_report
 
 SEP      = "=" * 68
 OUT_DIR  = Path(__file__).parent.parent / "out_test"
@@ -101,7 +102,7 @@ STD_SOURCE = "Source File"
 
 def _normalise(df: pd.DataFrame, source_name: str) -> pd.DataFrame | None:
     """
-    Map detected columns to standard names and keep only relevant columns.
+    Rename detected columns to standard names, keep ALL other columns as-is.
     Returns None if mandatory columns (amount) cannot be found.
     """
     amount_col = _detect_amount_col(df)
@@ -109,24 +110,17 @@ def _normalise(df: pd.DataFrame, source_name: str) -> pd.DataFrame | None:
     desc_col   = _detect_col(df, _DESC_RE)
 
     if not amount_col:
-        print(f"  [normalise] {source_name}: no amount column found — skipping file")
+        print(f"  [normalise] {source_name}: no amount column found -- skipping file")
         return None
 
     rename = {}
-    keep   = []
-
     if date_col:
         rename[date_col] = STD_DATE
-        keep.append(STD_DATE)
-
     if desc_col:
         rename[desc_col] = STD_DESC
-        keep.append(STD_DESC)
-
     rename[amount_col] = STD_AMOUNT
-    keep.append(STD_AMOUNT)
 
-    out = df.rename(columns=rename)[keep].copy()
+    out = df.rename(columns=rename).copy()
     out[STD_AMOUNT] = pd.to_numeric(out[STD_AMOUNT], errors="coerce")
     out[STD_SOURCE] = source_name
 
@@ -141,39 +135,45 @@ def _normalise(df: pd.DataFrame, source_name: str) -> pd.DataFrame | None:
 
 # ── Step 4: Combine ────────────────────────────────────────────────────────────
 
+# Sub-description column names to look for (same priority order as expense_report)
+_SUB_DESC_CANDIDATES = ["Sub-description", "Sub description", "sub_description",
+                         "Description 2"]
+
 def _combine(frames: list[pd.DataFrame]) -> pd.DataFrame:
     combined = pd.concat(frames, ignore_index=True)
+
+    # Sort by source file then date
     sort_cols = [STD_SOURCE]
     if STD_DATE in combined.columns:
         sort_cols.append(STD_DATE)
     combined = combined.sort_values(sort_cols).reset_index(drop=True)
-    return combined
 
+    # Reorder: put Description, sub-desc cols, and Amount next to each other
+    priority = [STD_SOURCE, STD_DATE, STD_DESC]
+    for sub in _SUB_DESC_CANDIDATES:
+        if sub in combined.columns:
+            priority.append(sub)
+    priority.append(STD_AMOUNT)
 
-# ── Step 5: Expense report ─────────────────────────────────────────────────────
+    front   = [c for c in priority if c in combined.columns]
+    rest    = [c for c in combined.columns if c not in front]
+    combined = combined[front + rest]
 
-def _expense_report(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Filter to expenses (negative Amount), group by Description,
-    sum absolute value, sort descending, add Percentage column.
-    """
-    expenses = df[df[STD_AMOUNT] < 0].copy()
-    expenses[STD_AMOUNT] = expenses[STD_AMOUNT].abs()
+    # Add validation columns right after Amount (default Valid = 1)
+    amount_idx = combined.columns.get_loc(STD_AMOUNT)
+    combined.insert(amount_idx + 1, "Valid", 1)
+    combined.insert(amount_idx + 2, "Note", "")
 
-    if STD_DESC not in expenses.columns or expenses.empty:
-        return pd.DataFrame(columns=[STD_DESC, "Total Spent", "Percentage"])
-
-    grouped = (
-        expenses.groupby(STD_DESC, as_index=False)[STD_AMOUNT]
-        .sum()
-        .rename(columns={STD_AMOUNT: "Total Spent"})
-        .sort_values("Total Spent", ascending=False)
-        .reset_index(drop=True)
+    # Append a sum row — only sum rows where Valid == 1
+    valid_total = combined.loc[combined["Valid"] == 1, STD_AMOUNT].sum().round(2)
+    sum_row = {col: "" for col in combined.columns}
+    sum_row[STD_DESC]   = "TOTAL (Valid only)"
+    sum_row[STD_AMOUNT] = valid_total
+    combined = pd.concat(
+        [combined, pd.DataFrame([sum_row])], ignore_index=True
     )
 
-    total = grouped["Total Spent"].sum()
-    grouped["Percentage"] = (grouped["Total Spent"] / total * 100).round(2)
-    return grouped
+    return combined
 
 
 # ── Read helper ────────────────────────────────────────────────────────────────
@@ -253,22 +253,16 @@ def run(month: int, input_files: list[str]) -> None:
     print(f"  Saved               : {combined_path}")
 
     # Step 5 — expense report
-    print(f"\n{SEP}")
-    print("  STAGE 5 — Expense Summary")
-    print(SEP)
-    summary = _expense_report(combined)
-
-    if summary.empty:
-        print("  No expenses found.")
-    else:
-        print(summary.to_string(index=False))
+    summary = generate_expense_report(combined)
+    print(f"\n{format_report(summary)}")
 
     summary_path = OUT_DIR / f"life_expense_month_{month}_summary.csv"
     summary.to_csv(summary_path, index=False)
 
-    print(f"\n  Total cells scrubbed : {total_scrubbed}")
+    categories = summary[summary["Category"] != "TOTAL"]["Category"].nunique()
+    print(f"  Total cells scrubbed : {total_scrubbed}")
     print(f"  Total rows in output : {len(combined)}")
-    print(f"  Expense categories   : {len(summary)}")
+    print(f"  Expense categories   : {categories}")
     print(f"  Saved summary        : {summary_path}")
     print(SEP)
 
