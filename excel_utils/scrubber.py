@@ -306,6 +306,8 @@ def format_diff(
         return "\n".join(lines)
 
     lines.append(f"  {len(changes)} redaction(s) applied\n")
+
+    # ── Detail table ──────────────────────────────────────────────────────────
     lines.append(f"{'Row':<6}  {'Column':<28}  {'Original':>22}   {'Redacted':<12}  Reason")
     lines.append(f"{'-'*6}  {'-'*28}  {'-'*22}   {'-'*12}  {'-'*30}")
 
@@ -316,6 +318,20 @@ def format_diff(
             f"{str(c['row'] + 2):<6}  {c['column']:<28}  "
             f"{display!r:>22} -> {c['redacted']:<12}  [{c['reason']}]"
         )
+
+    # ── Summary ───────────────────────────────────────────────────────────────
+    from collections import Counter
+    col_counts    = Counter(c["column"] for c in changes)
+    reason_counts = Counter(c["reason"] for c in changes)
+
+    lines.append(sep)
+    lines.append("  SUMMARY")
+    lines.append("  By column:")
+    for col, cnt in sorted(col_counts.items(), key=lambda x: -x[1]):
+        lines.append(f"    • {col:<28}  {cnt} cell(s) cleared")
+    lines.append("  By data type:")
+    for reason, cnt in sorted(reason_counts.items(), key=lambda x: -x[1]):
+        lines.append(f"    • {reason:<40}  {cnt} cell(s)")
 
     lines.append(sep)
     return "\n".join(lines)
