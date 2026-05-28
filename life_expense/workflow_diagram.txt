@@ -1,0 +1,158 @@
+================================================================
+  life_expense.py  —  WORKFLOW DIAGRAM
+================================================================
+
+COMMAND
+    python life_expense.py --month <N> file_a.csv file_b.csv ...
+
+INPUT
+    file_a.csv  file_b.csv  file_c.xlsx  ...  (one or more bank exports)
+         |           |           |
+         +-----+-----+-----------+
+               |
+               v
+  +-------------------------------------------------+
+  |  Per-file loop (Steps 1-3 run on EACH file)     |
+  +-------------------------------------------------+
+               |
+               v
+  +---------------------------+
+  |  STEP 1 — SCRUB           |
+  |  excel_utils/scrubber.py  |
+  +---------------------------+
+  | Detects sensitive columns |
+  | by name (Account Number,  |
+  | BSB, Card No, etc.) and   |
+  | by value regex (card      |
+  | numbers, TFNs, etc.).     |
+  | Replaces with [REDACTED]. |
+  | No file written here.     |
+  +---------------------------+
+               |
+               v
+  +---------------------------+
+  |  STEP 2 — MONTH FILTER    |
+  |  excel_utils/             |
+  |    excel_filter.py        |
+  +---------------------------+
+  | Auto-detects the date     |
+  | column (name contains     |
+  | "date", "time", "trans"). |
+  | Keeps only rows whose     |
+  | date matches --month N.   |
+  | Drops all other months.   |
+  | No file written here.     |
+  +---------------------------+
+               |
+               v
+  +---------------------------+
+  |  STEP 3 — NORMALISE       |
+  +---------------------------+
+  | Renames detected columns  |
+  | to standard names:        |
+  |   CAD$ / USD$  -> Amount  |
+  |   Transaction  -> Date    |
+  |   Description1 -> Descr.  |
+  | Adds "Source File" col.   |
+  | Keeps ALL other columns.  |
+  | No file written here.     |
+  +---------------------------+
+               |
+         (repeat for
+          each file)
+               |
+               v
+  +------------------------------------------+
+  |  STEP 4 — COMBINE                        |
+  +------------------------------------------+
+  | Stacks all normalised DataFrames.        |
+  | Sorts rows by: Source File, then Date.   |
+  | Reorders columns so Description,         |
+  |   Sub-description, Desc 2, Amount        |
+  |   sit next to each other.               |
+  | Adds "Valid" column (default = 1).       |
+  | Adds "Note" column (blank).              |
+  | Appends TOTAL row = sum of Valid==1 rows.|
+  +------------------------------------------+
+               |
+               v  FILE WRITTEN
+  +--------------------------------------------+
+  |  out_test/life_expense_month_<N>_combined.csv
+  +--------------------------------------------+
+  | Columns:                                   |
+  |   Source File | Date | Description |       |
+  |   Description 2 | Amount | Valid | Note |  |
+  |   Account Type | Account Number | ...      |
+  | Last row: TOTAL (Valid only)               |
+  |                                            |
+  | -> You can manually set Valid = 0 to       |
+  |    exclude a row from the summary.         |
+  +--------------------------------------------+
+               |
+               v
+  +------------------------------------------+
+  |  STEP 5 — EXPENSE REPORT                 |
+  |  life_expense/expense_report.py          |
+  +------------------------------------------+
+  | Filters to rows where Valid == 1.        |
+  | Filters to expense rows (Amount < 0).    |
+  | Groups by Description (primary) and      |
+  |   Sub-description / Description 2        |
+  |   (secondary).                           |
+  | Sorts by category total desc.            |
+  | Computes:                                |
+  |   % of category  (sub / category total) |
+  |   % of total     (sub / grand total)    |
+  | Appends TOTAL row.                       |
+  +------------------------------------------+
+               |
+               v  FILE WRITTEN
+  +--------------------------------------------+
+  |  out_test/life_expense_month_<N>_summary.csv
+  +--------------------------------------------+
+  | Columns:                                   |
+  |   Category | Sub Description |             |
+  |   Total Spent | % of Category | % of Total |
+  | Last row: TOTAL                            |
+  +--------------------------------------------+
+
+
+================================================================
+  OUTPUT FILES SUMMARY
+================================================================
+
+  out_test/
+  |
+  +-- life_expense_month_<N>_combined.csv
+  |       All transactions from all input files,
+  |       scrubbed + filtered to month N.
+  |       Includes Valid / Note columns for manual review.
+  |       Last row = TOTAL of Valid==1 rows.
+  |
+  +-- life_expense_month_<N>_summary.csv
+          Expense category breakdown.
+          Two-level: Category > Sub Description.
+          Shows % of category and % of total spend.
+          Last row = TOTAL.
+
+
+================================================================
+  CALLED MODULES
+================================================================
+
+  life_expense.py
+    |-- excel_utils/scrubber.py       (Step 1: redaction)
+    |-- excel_utils/excel_filter.py   (Step 2: month filter)
+    +-- life_expense/expense_report.py (Step 5: summary)
+
+
+================================================================
+  FLOW IF A FILE IS SKIPPED
+================================================================
+
+  File not found      -> skipped with warning, pipeline continues
+  No amount column    -> skipped with warning, pipeline continues
+  No rows after filter-> skipped with warning, pipeline continues
+  No files with data  -> pipeline exits early, no output written
+
+================================================================

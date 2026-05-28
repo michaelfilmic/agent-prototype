@@ -29,53 +29,103 @@ from pathlib import Path
 import pandas as pd
 
 STD_AMOUNT = "Amount"
-STD_DESC   = "Description"
+STD_DESC   = "Description"       # mapped from Description 1
 
-# Column names to probe for secondary description, in priority order
-_SUB_DESC_CANDIDATES = ["Sub-description", "Sub description", "sub_description",
-                         "Description 2", "Merchant", "Payee", "Narrative"]
-
-COL_CATEGORY    = "Category"
-COL_SUB         = "Sub Description"
+# Explicit column names for the three description levels
+COL_CATEGORY    = "Category"        # <- standard category (mapped)
+COL_DESC        = "Description"     # <- Description 2 (merchant)
+COL_SUB         = "Sub Description" # <- Sub-description
 COL_SPENT       = "Total Spent"
 COL_PCT_CAT     = "% of Category"
 COL_PCT_TOTAL   = "% of Total"
 
+# Source column names in the combined CSV
+_SRC_DESC2  = "Description 2"
+_SRC_SUB    = "Sub-description"
 
-# ── Helpers ────────────────────────────────────────────────────────────────────
+# ── Standard category rules ────────────────────────────────────────────────────
+# Each entry: (standard_category, [keyword, ...])
+# Matching is case-insensitive against "<Description1> <Description2>" combined.
+# First match wins; unmatched rows fall into "Other".
 
-def _find_sub_desc_col(df: pd.DataFrame) -> str | None:
-    """Return the first matching sub-description column present in df."""
-    for name in _SUB_DESC_CANDIDATES:
-        if name in df.columns:
-            return name
-    return None
+CATEGORY_RULES: list[tuple[str, list[str]]] = [
+    ("Income & Deposits",    ["payroll", "salary", "deposit", "direct deposit",
+                               "transfer cr", "funds transfer cr", "correction",
+                               "rebate", "refund", "cashback", "interest payment",
+                               "payment - thank you", "paiement - merci",
+                               "monthly fee rebate", "misc payment"]),
+    ("Food & Dining",        ["mcdonald", "tim horton", "wendy", "harvey", "a&w",
+                               "hot pot", "eatery", "noodle", "doner", "chatime",
+                               "bakery", "sushi", "szechuan", "freshii", "poke",
+                               "restaurant", "dough", "coco fresh", "saint germain",
+                               "aramark", "me va me", "choice of the orient",
+                               "bread & cup", "one bowl", "kome", "dining",
+                               "burger", "pizza", "cafe", "coffee", "subway",
+                               "c-idp purchase", "pos purchase"]),
+    ("Groceries",            ["walmart", "wal-mart", "winco food", "loblaws",
+                               "metro", "whole foods", "food mart", "grocery",
+                               "groceries", "supermarket", "sobeys", "costco",
+                               "no frills", "food basics"]),
+    ("Transport",            ["petro-canada", "petro canada", "esso", "shell",
+                               "gas station", "presto", "transit", "uber",
+                               "lyft", "taxi", "parking", "transport", "go train",
+                               "ttc", "highway toll"]),
+    ("Housing & Utilities",  ["rent", "enercare", "hydro", "enbridge", "utility",
+                               "utilities", "mortgage", "property", "home service",
+                               "electricity", "water bill", "utility bill"]),
+    ("Health",               ["pharmacy", "shoppers", "healthcare", "medical",
+                               "drug mart", "health", "dental", "clinic",
+                               "hospital", "prescription"]),
+    ("Sports & Leisure",     ["volleyball", "javelin", "gametime", "bpnsprts",
+                               "entertainment", "cinema", "cineplex", "steam",
+                               "sport", "gym", "fitness", "golf", "bowling",
+                               "ticket", "concert", "theatre"]),
+    ("Subscriptions & Bills",["rogers", "bell", "telus", "netflix", "spotify",
+                               "amazon prime", "disney", "apple", "google",
+                               "insurance", "monthly fee", "subscription",
+                               "internet", "phone bill", "wireless", "cable"]),
+    ("Finance & Transfers",  ["www tfr", "www trf", "e-transfer", "email trf",
+                               "transfer", "loan pmt", "loan interest", "interest",
+                               "payment", "bill payment", "misc payment",
+                               "funds transfer", "service charge", "bank fee",
+                               "withdrawal", "customer transfer", "monthly fee",
+                               "csra"]),
+]
+
+OTHER_CATEGORY = "Other"
 
 
-def _coalesce_sub(row: pd.Series, cols: list[str]) -> str:
-    """Return the first non-empty value across the given columns."""
-    for c in cols:
-        val = str(row.get(c, "")).strip()
-        if val and val.lower() not in ("nan", "none", ""):
-            return val
-    return "(no detail)"
+def _classify(raw_desc1: str, raw_desc2: str) -> str:
+    """Map raw description values to a standard category using keyword matching."""
+    text = f"{raw_desc1} {raw_desc2}".lower()
+    for category, keywords in CATEGORY_RULES:
+        if any(kw in text for kw in keywords):
+            return category
+    return OTHER_CATEGORY
+
+
+def _clean(val) -> str:
+    """Strip and return empty string for NaN/None."""
+    s = str(val).strip()
+    return "" if s.lower() in ("nan", "none") else s
 
 
 # ── Core ───────────────────────────────────────────────────────────────────────
 
 def generate(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Build a two-level expense summary.
+    Build a three-level expense summary.
 
-    Parameters
-    ----------
-    df : DataFrame with at least an 'Amount' column; ideally also 'Description'
-         and one of the sub-description columns listed in _SUB_DESC_CANDIDATES.
+    Column mapping from combined CSV:
+        Category        <- Description   (Description 1 — expense type)
+        Description     <- Description 2 (merchant / second label)
+        Sub Description <- Sub-description (lowest-level detail)
 
     Returns
     -------
-    Flat DataFrame with columns:
-        Category | Sub Description | Total Spent | % of Category | % of Total
+    DataFrame with columns:
+        Category | Description | Sub Description |
+        Total Spent | % of Category | % of Total
     Includes a TOTAL row at the bottom.
     """
     if STD_AMOUNT not in df.columns:
@@ -84,105 +134,127 @@ def generate(df: pd.DataFrame) -> pd.DataFrame:
             f"Available columns: {list(df.columns)}"
         )
 
-    # Respect Valid column if present: 0 = exclude, 1 (or empty) = include
+    # Drop the artificial TOTAL row written by _combine
+    if COL_CATEGORY in df.columns:
+        df = df[~df[COL_CATEGORY].astype(str).str.startswith("TOTAL")]
+    if STD_DESC in df.columns:
+        df = df[~df[STD_DESC].astype(str).str.startswith("TOTAL")]
+
+    # Respect Valid column: 0 = exclude, 1 or empty = include
     if "Valid" in df.columns:
         df = df[pd.to_numeric(df["Valid"], errors="coerce").fillna(1) == 1]
 
-    expenses = df[df[STD_AMOUNT] < 0].copy()
-    expenses[STD_AMOUNT] = expenses[STD_AMOUNT].abs()
+    # Keep ALL rows — income, expenses, refunds, zero-amount rows excluded
+    expenses = df[df[STD_AMOUNT] != 0].copy()
 
     if expenses.empty:
-        return pd.DataFrame(columns=[COL_CATEGORY, COL_SUB,
+        return pd.DataFrame(columns=[COL_CATEGORY, COL_DESC, COL_SUB,
                                      COL_SPENT, COL_PCT_CAT, COL_PCT_TOTAL])
 
-    # Fill missing primary description
-    if STD_DESC not in expenses.columns:
-        expenses[STD_DESC] = "Other"
-    else:
-        expenses[STD_DESC] = expenses[STD_DESC].fillna("Other").astype(str).str.strip()
-
-    # Determine sub-description: coalesce sub-desc + description-2
-    sub_cols = [c for c in _SUB_DESC_CANDIDATES if c in expenses.columns]
-    if sub_cols:
-        expenses[COL_SUB] = expenses.apply(lambda r: _coalesce_sub(r, sub_cols), axis=1)
-    else:
-        expenses[COL_SUB] = "(no detail)"
-
-    # Group by category + sub
-    grouped = (
-        expenses.groupby([STD_DESC, COL_SUB], as_index=False)[STD_AMOUNT]
-        .sum()
-        .rename(columns={STD_AMOUNT: COL_SPENT, STD_DESC: COL_CATEGORY})
+    # ── Map the three description levels ──────────────────────────────────────
+    raw_desc1 = (
+        expenses[STD_DESC].fillna("").astype(str).str.strip()
+        if STD_DESC in expenses.columns else pd.Series("", index=expenses.index)
+    )
+    raw_desc2 = (
+        expenses[_SRC_DESC2].apply(_clean)
+        if _SRC_DESC2 in expenses.columns
+        else pd.Series("", index=expenses.index)
     )
 
-    grand_total = grouped[COL_SPENT].sum()
+    # Classify into standard categories (< 10)
+    expenses[COL_CATEGORY] = [
+        _classify(d1, d2) for d1, d2 in zip(raw_desc1, raw_desc2)
+    ]
+    expenses[COL_DESC] = raw_desc2
+    expenses[COL_SUB] = (
+        expenses[_SRC_SUB].apply(_clean)
+        if _SRC_SUB in expenses.columns else ""
+    )
 
-    # Category-level totals for sorting and % of category
-    cat_totals = grouped.groupby(COL_CATEGORY)[COL_SPENT].sum().rename("_cat_total")
-    grouped = grouped.join(cat_totals, on=COL_CATEGORY)
+    # Group by all three levels
+    group_cols = [COL_CATEGORY, COL_DESC, COL_SUB]
+    grouped = (
+        expenses.groupby(group_cols, as_index=False)[STD_AMOUNT]
+        .sum()
+        .rename(columns={STD_AMOUNT: COL_SPENT})
+    )
 
-    grouped[COL_PCT_CAT]   = (grouped[COL_SPENT] / grouped["_cat_total"] * 100).round(2)
-    grouped[COL_PCT_TOTAL] = (grouped[COL_SPENT] / grand_total * 100).round(2)
+    # Use absolute values for percentage calculation so income and expenses
+    # are both shown as positive proportions of total activity
+    grouped["_abs"] = grouped[COL_SPENT].abs()
+    grand_abs = grouped["_abs"].sum()
 
-    # Sort: by category total desc, then sub-description total desc
+    cat_abs = grouped.groupby(COL_CATEGORY)["_abs"].sum().rename("_cat_abs")
+    grouped = grouped.join(cat_abs, on=COL_CATEGORY)
+
+    grouped[COL_PCT_CAT]   = (grouped["_abs"] / grouped["_cat_abs"] * 100).round(2)
+    grouped[COL_PCT_TOTAL] = (grouped["_abs"] / grand_abs * 100).round(2)
+
     grouped = (
         grouped
-        .sort_values(["_cat_total", COL_SPENT], ascending=[False, False])
-        .drop(columns=["_cat_total"])
+        .sort_values(["_cat_abs", "_abs"], ascending=[False, False])
+        .drop(columns=["_abs", "_cat_abs"])
         .reset_index(drop=True)
     )
+
+    net_total = grouped[COL_SPENT].sum()
 
     # Append TOTAL row
     total_row = pd.DataFrame([{
         COL_CATEGORY:  "TOTAL",
+        COL_DESC:      "",
         COL_SUB:       "",
-        COL_SPENT:     round(grand_total, 2),
+        COL_SPENT:     round(net_total, 2),
         COL_PCT_CAT:   "",
         COL_PCT_TOTAL: 100.0,
     }])
     grouped = pd.concat([grouped, total_row], ignore_index=True)
 
-    return grouped[[COL_CATEGORY, COL_SUB, COL_SPENT, COL_PCT_CAT, COL_PCT_TOTAL]]
+    return grouped[[COL_CATEGORY, COL_DESC, COL_SUB,
+                    COL_SPENT, COL_PCT_CAT, COL_PCT_TOTAL]]
 
 
 # ── Terminal display ───────────────────────────────────────────────────────────
 
 def format_report(summary: pd.DataFrame) -> str:
     """Render the summary as a readable grouped hierarchy for terminal output."""
-    sep  = "=" * 68
-    sep2 = "-" * 68
-    lines = [sep, "  EXPENSE SUMMARY  (by category > sub-description)", sep]
+    sep  = "=" * 76
+    sep2 = "-" * 74
+    lines = [sep, "  EXPENSE SUMMARY  (Category > Description > Sub Description)", sep]
 
     if summary.empty or (len(summary) == 1 and summary.iloc[0][COL_CATEGORY] == "TOTAL"):
         lines.append("  No expenses found.")
         lines.append(sep)
         return "\n".join(lines)
 
-    rows = summary[summary[COL_CATEGORY] != "TOTAL"]
+    rows      = summary[summary[COL_CATEGORY] != "TOTAL"]
     total_row = summary[summary[COL_CATEGORY] == "TOTAL"]
 
     current_cat = None
     for _, row in rows.iterrows():
-        if row[COL_CATEGORY] != current_cat:
+        cat = row[COL_CATEGORY]
+        if cat != current_cat:
             if current_cat is not None:
                 lines.append("")
-            current_cat = row[COL_CATEGORY]
-            # Category header: name + % of total
-            pct_total = rows[rows[COL_CATEGORY] == current_cat][COL_PCT_TOTAL].sum()
-            cat_spent = rows[rows[COL_CATEGORY] == current_cat][COL_SPENT].sum()
-            lines.append(f"  {current_cat:<28}  ${cat_spent:>10.2f}   ({pct_total:.2f}% of total)")
-            lines.append(f"  {'  Sub Description':<28}  {'Spent':>10}   {'% cat':>6}  {'% total':>7}")
-            lines.append(f"  {sep2[2:]}")
+            current_cat = cat
+            cat_spent   = rows[rows[COL_CATEGORY] == cat][COL_SPENT].sum()
+            pct_total   = rows[rows[COL_CATEGORY] == cat][COL_PCT_TOTAL].sum()
+            lines.append(f"  {cat:<30}  ${cat_spent:>10.2f}   ({pct_total:.2f}% of total)")
+            lines.append(f"    {'Description':<24}  {'Sub Description':<22}  {'Spent':>10}  {'%cat':>6}  {'%tot':>6}")
+            lines.append(f"    {sep2}")
 
+        desc = str(row[COL_DESC]) if row[COL_DESC] else "-"
+        sub  = str(row[COL_SUB])  if row[COL_SUB]  else "-"
         lines.append(
-            f"    {str(row[COL_SUB]):<26}  ${row[COL_SPENT]:>10.2f}"
-            f"   {str(row[COL_PCT_CAT]):>5}%  {str(row[COL_PCT_TOTAL]):>6}%"
+            f"    {desc:<24}  {sub:<22}  ${row[COL_SPENT]:>10.2f}"
+            f"  {str(row[COL_PCT_CAT]):>5}%  {str(row[COL_PCT_TOTAL]):>5}%"
         )
 
     if not total_row.empty:
         t = total_row.iloc[0]
         lines.append(f"\n{sep}")
-        lines.append(f"  {'TOTAL':<28}  ${t[COL_SPENT]:>10.2f}   (100%)")
+        lines.append(f"  {'TOTAL':<30}  ${t[COL_SPENT]:>10.2f}   (100%)")
 
     lines.append(sep)
     return "\n".join(lines)
